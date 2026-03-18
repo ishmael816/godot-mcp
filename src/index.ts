@@ -14,6 +14,7 @@ import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { DocManager } from './docs/DocManager.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
@@ -68,6 +69,7 @@ class GodotServer {
   private operationsScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
   private strictPathValidation: boolean = false;
+  private docManager: DocManager | null = null;
 
   /**
    * Parameter name mappings between snake_case and camelCase
@@ -134,6 +136,9 @@ class GodotServer {
     // Set the path to the operations script
     this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
     if (debugMode) console.error(`[DEBUG] Operations script path: ${this.operationsScriptPath}`);
+
+    // Initialize documentation manager
+    this.docManager = new DocManager('4.2'); // Default to 4.2, will be updated based on detected version
 
     // Initialize the MCP server
     this.server = new Server(
@@ -913,6 +918,217 @@ class GodotServer {
             required: ['projectPath'],
           },
         },
+        {
+          name: 'capture_screenshot',
+          description: 'Capture a screenshot of a Godot scene. Renders the scene and saves it as a PNG image for visual verification and iterative UI development.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              scenePath: {
+                type: 'string',
+                description: 'Path to the scene file to capture (relative to project)',
+              },
+              outputPath: {
+                type: 'string',
+                description: 'Path where the screenshot will be saved (relative to project, should end with .png)',
+              },
+              width: {
+                type: 'number',
+                description: 'Screenshot width in pixels (default: 1920)',
+              },
+              height: {
+                type: 'number',
+                description: 'Screenshot height in pixels (default: 1080)',
+              },
+              delay: {
+                type: 'number',
+                description: 'Delay in seconds before capturing to let scene stabilize (default: 0.5)',
+              },
+              transparentBg: {
+                type: 'boolean',
+                description: 'Whether to use transparent background (default: false)',
+              },
+              disable3d: {
+                type: 'boolean',
+                description: 'Whether to disable 3D rendering for better 2D performance (default: false)',
+              },
+            },
+            required: ['projectPath', 'scenePath', 'outputPath'],
+          },
+        },
+        {
+          name: 'attach_script',
+          description: 'Attach a GDScript or C# script to a node in a Godot scene. The script file must already exist. Modifies the scene file to include the script reference.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              scenePath: {
+                type: 'string',
+                description: 'Path to the scene file (relative to project)',
+              },
+              nodePath: {
+                type: 'string',
+                description: 'Path to the target node (e.g., "root" for root node, "root/Player" for child node)',
+              },
+              scriptPath: {
+                type: 'string',
+                description: 'Path to the script file (relative to project, e.g., "scripts/player.gd")',
+              },
+            },
+            required: ['projectPath', 'scenePath', 'nodePath', 'scriptPath'],
+          },
+        },
+        {
+          name: 'query_documentation',
+          description: 'Query Godot class documentation. Returns information about classes, methods, properties, signals, and constants. Automatically downloads documentation on first use if not cached locally. Use this to verify API correctness and prevent hallucinations.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              className: {
+                type: 'string',
+                description: 'Name of the Godot class to query (e.g., "Button", "CharacterBody2D", "Vector2")',
+              },
+              memberName: {
+                type: 'string',
+                description: 'Optional: Specific member to query (method, property, signal, or constant name)',
+              },
+              memberType: {
+                type: 'string',
+                enum: ['method', 'property', 'signal', 'constant'],
+                description: 'Optional: Type of member to search for (speeds up search)',
+              },
+              godotVersion: {
+                type: 'string',
+                description: 'Optional: Godot version (e.g., "4.2", "4.3"). Uses cached version or downloads if not available.',
+              },
+            },
+            required: ['className'],
+          },
+        },
+        {
+          name: 'validate_api',
+          description: 'Validate Godot API usage and detect potential errors. Checks if class/member exists, validates method signatures, and provides suggestions for corrections. Use this before generating code to ensure API correctness.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              className: {
+                type: 'string',
+                description: 'Name of the Godot class',
+              },
+              memberName: {
+                type: 'string',
+                description: 'Method, property, or signal name being used',
+              },
+              usage: {
+                type: 'string',
+                description: 'Optional: How you are using this API (e.g., "button.pressed.connect(on_click)") for context-aware validation',
+              },
+              godotVersion: {
+                type: 'string',
+                description: 'Optional: Godot version for version-specific validation',
+              },
+            },
+            required: ['className', 'memberName'],
+          },
+        },
+        {
+          name: 'connect_signal',
+          description: 'Connect a Godot signal to a method callback. Enables UI interactions like button clicks. Modifies the scene to persist the signal connection.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              scenePath: {
+                type: 'string',
+                description: 'Path to the scene file (relative to project)',
+              },
+              nodePath: {
+                type: 'string',
+                description: 'Path to the node that emits the signal (e.g., "root/StartButton")',
+              },
+              signalName: {
+                type: 'string',
+                description: 'Name of the signal to connect (e.g., "pressed", "body_entered")',
+              },
+              targetPath: {
+                type: 'string',
+                description: 'Path to the node that contains the callback method (usually same as nodePath or "root")',
+              },
+              methodName: {
+                type: 'string',
+                description: 'Name of the callback method (e.g., "_on_start_button_pressed")',
+              },
+              flags: {
+                type: 'number',
+                description: 'Optional: Connection flags (0=default, 1=deferred, 2=one_shot, 4=reference_counted)',
+              },
+            },
+            required: ['projectPath', 'scenePath', 'nodePath', 'signalName', 'targetPath', 'methodName'],
+          },
+        },
+        {
+          name: 'set_node_property',
+          description: 'Set a property value on a node in a Godot scene. Supports position, scale, rotation, colors, and theme overrides. Modifies the scene file to persist the changes.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              scenePath: {
+                type: 'string',
+                description: 'Path to the scene file (relative to project)',
+              },
+              nodePath: {
+                type: 'string',
+                description: 'Path to the target node (e.g., "root" or "root/StartButton")',
+              },
+              propertyPath: {
+                type: 'string',
+                description: 'Property path (e.g., "position", "modulate", "scale:x", "theme_override_colors/font_color")',
+              },
+              propertyValue: {
+                type: ['string', 'number', 'boolean'],
+                description: 'Property value. Supports numbers, "Vector2(100, 200)", "Color.red", "#ff0000", "true/false"',
+              },
+            },
+            required: ['projectPath', 'scenePath', 'nodePath', 'propertyPath', 'propertyValue'],
+          },
+        },
+        {
+          name: 'delete_node',
+          description: 'Delete a node from a Godot scene. Cannot delete the root node. Modifies the scene file to persist the changes.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              scenePath: {
+                type: 'string',
+                description: 'Path to the scene file (relative to project)',
+              },
+              nodePath: {
+                type: 'string',
+                description: 'Path to the node to delete (e.g., "root/OldButton")',
+              },
+            },
+            required: ['projectPath', 'scenePath', 'nodePath'],
+          },
+        },
       ],
     }));
 
@@ -948,6 +1164,20 @@ class GodotServer {
           return await this.handleGetUid(request.params.arguments);
         case 'update_project_uids':
           return await this.handleUpdateProjectUids(request.params.arguments);
+        case 'capture_screenshot':
+          return await this.handleCaptureScreenshot(request.params.arguments);
+        case 'attach_script':
+          return await this.handleAttachScript(request.params.arguments);
+        case 'query_documentation':
+          return await this.handleQueryDocumentation(request.params.arguments);
+        case 'validate_api':
+          return await this.handleValidateApi(request.params.arguments);
+        case 'connect_signal':
+          return await this.handleConnectSignal(request.params.arguments);
+        case 'set_node_property':
+          return await this.handleSetNodeProperty(request.params.arguments);
+        case 'delete_node':
+          return await this.handleDeleteNode(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -2138,6 +2368,931 @@ class GodotServer {
           'Ensure Godot is installed correctly',
           'Check if the GODOT_PATH environment variable is set correctly',
           'Verify the project path is accessible',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the capture_screenshot tool
+   */
+  private async handleCaptureScreenshot(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath || !args.scenePath || !args.outputPath) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath, scenePath, and outputPath']
+      );
+    }
+
+    if (
+      !this.validatePath(args.projectPath) ||
+      !this.validatePath(args.scenePath) ||
+      !this.validatePath(args.outputPath)
+    ) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      // Check if the project directory exists and contains a project.godot file
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      // Check if the scene file exists
+      const scenePath = join(args.projectPath, args.scenePath);
+      if (!existsSync(scenePath)) {
+        return this.createErrorResponse(
+          `Scene file does not exist: ${args.scenePath}`,
+          [
+            'Ensure the scene path is correct',
+            'Use create_scene to create a new scene first',
+          ]
+        );
+      }
+
+      // Prepare parameters for the operation (already in camelCase)
+      const params: any = {
+        scenePath: args.scenePath,
+        outputPath: args.outputPath,
+      };
+
+      // Add optional parameters
+      if (args.width) {
+        params.width = args.width;
+      }
+      if (args.height) {
+        params.height = args.height;
+      }
+      if (args.delay !== undefined) {
+        params.delay = args.delay;
+      }
+      if (args.transparentBg !== undefined) {
+        params.transparent_bg = args.transparentBg;
+      }
+      if (args.disable3d !== undefined) {
+        params.disable_3d = args.disable3d;
+      }
+
+      this.logDebug(`Capturing screenshot of ${args.scenePath} to ${args.outputPath}`);
+
+      // Execute the operation
+      const { stdout, stderr } = await this.executeOperation('capture_screenshot', params, args.projectPath);
+
+      if (stderr && stderr.includes('Failed to')) {
+        return this.createErrorResponse(
+          `Failed to capture screenshot: ${stderr}`,
+          [
+            'Check if the scene file is valid',
+            'Ensure you have write permissions to the output path',
+            'Verify the scene can be loaded and rendered',
+          ]
+        );
+      }
+
+      // Parse the result JSON if present
+      let resultText = stdout.trim();
+      try {
+        const result = JSON.parse(resultText);
+        if (result.success) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Screenshot captured successfully!\n\nSaved to: ${result.path}\nAbsolute path: ${result.absolute_path}\nSize: ${result.size.x}x${result.size.y}\n\nYou can now view this image to verify the visual appearance of your UI/scene.`,
+              },
+            ],
+          };
+        }
+      } catch (e) {
+        // JSON parsing failed, use raw output
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Screenshot captured.\n\nOutput: ${resultText}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to capture screenshot: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Check if the GODOT_PATH environment variable is set correctly',
+          'Verify the project path is accessible',
+          'Make sure the scene can be rendered (not corrupted)',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the attach_script tool
+   */
+  private async handleAttachScript(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath || !args.scenePath || !args.nodePath || !args.scriptPath) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath, scenePath, nodePath, and scriptPath']
+      );
+    }
+
+    if (
+      !this.validatePath(args.projectPath) ||
+      !this.validatePath(args.scenePath) ||
+      !this.validatePath(args.nodePath) ||
+      !this.validatePath(args.scriptPath)
+    ) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      // Check if the project directory exists and contains a project.godot file
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      // Check if the scene file exists
+      const scenePath = join(args.projectPath, args.scenePath);
+      if (!existsSync(scenePath)) {
+        return this.createErrorResponse(
+          `Scene file does not exist: ${args.scenePath}`,
+          [
+            'Ensure the scene path is correct',
+            'Use create_scene to create a new scene first',
+          ]
+        );
+      }
+
+      // Check if the script file exists
+      const scriptPath = join(args.projectPath, args.scriptPath);
+      if (!existsSync(scriptPath)) {
+        return this.createErrorResponse(
+          `Script file does not exist: ${args.scriptPath}`,
+          [
+            'Ensure the script path is correct',
+            'Create the script file first before attaching it to a node',
+            'Use your code editor or AI assistant to generate the script content',
+          ]
+        );
+      }
+
+      // Validate script extension
+      if (!args.scriptPath.endsWith('.gd') && !args.scriptPath.endsWith('.cs')) {
+        return this.createErrorResponse(
+          'Invalid script file extension',
+          [
+            'Script file must end with .gd (GDScript) or .cs (C#)',
+            'Example: "scripts/player.gd" or "scripts/Enemy.cs"',
+          ]
+        );
+      }
+
+      // Prepare parameters for the operation
+      const params = {
+        scenePath: args.scenePath,
+        nodePath: args.nodePath,
+        scriptPath: args.scriptPath,
+      };
+
+      this.logDebug(`Attaching script ${args.scriptPath} to node ${args.nodePath} in ${args.scenePath}`);
+
+      // Execute the operation
+      const { stdout, stderr } = await this.executeOperation('attach_script', params, args.projectPath);
+
+      if (stderr && stderr.includes('Failed to')) {
+        return this.createErrorResponse(
+          `Failed to attach script: ${stderr}`,
+          [
+            'Check if the node path is correct',
+            'Ensure the script file is valid GDScript or C#',
+            'Verify the scene file is not corrupted',
+            'Make sure the node type is compatible with the script (e.g., Node2D script for Node2D node)',
+          ]
+        );
+      }
+
+      // Parse the result JSON
+      let resultText = stdout.trim();
+      try {
+        const result = JSON.parse(resultText);
+        if (result.success) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Script attached successfully!\n\nScene: ${result.scene_path}\nNode: ${result.node_path} (${result.node_type})\nScript: ${result.script_path}\n\nThe scene has been saved with the script reference.`,
+              },
+            ],
+          };
+        }
+      } catch (e) {
+        // JSON parsing failed, use raw output
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Script attached.\n\nOutput: ${resultText}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to attach script: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Check if the GODOT_PATH environment variable is set correctly',
+          'Verify the project path is accessible',
+          'Make sure the script file exists and is valid',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Initialize documentation manager if needed
+   */
+  private async ensureDocsInitialized(godotVersion?: string): Promise<boolean> {
+    if (!this.docManager) {
+      this.docManager = new DocManager(godotVersion || '4.2');
+    }
+
+    if (!this.docManager.isLoaded()) {
+      console.error('[SERVER] Initializing documentation manager...');
+      const success = await this.docManager.initialize();
+      if (success) {
+        console.error(`[SERVER] Documentation loaded: ${this.docManager.getClassCount()} classes`);
+      } else {
+        console.error('[SERVER] Failed to load documentation');
+      }
+      return success;
+    }
+
+    return true;
+  }
+
+  /**
+   * Handle the query_documentation tool
+   */
+  private async handleQueryDocumentation(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.className) {
+      return this.createErrorResponse(
+        'Class name is required',
+        ['Provide a valid Godot class name (e.g., "Button", "CharacterBody2D")']
+      );
+    }
+
+    try {
+      // Initialize docs if needed
+      const initialized = await this.ensureDocsInitialized(args.godotVersion);
+      if (!initialized || !this.docManager) {
+        return this.createErrorResponse(
+          'Documentation not available',
+          [
+            'Failed to initialize documentation manager',
+            'Check your internet connection for first-time download',
+            'Documentation is cached locally after first download',
+          ]
+        );
+      }
+
+      this.logDebug(`Querying documentation for ${args.className}${args.memberName ? '.' + args.memberName : ''}`);
+
+      // Query the documentation
+      const result = this.docManager.query(
+        args.className,
+        args.memberName,
+        args.memberType
+      );
+
+      if (!result.found) {
+        const suggestions = result.suggestions && result.suggestions.length > 0
+          ? result.suggestions
+          : [];
+        
+        const solutions = [
+          'Check the spelling of the class/member name',
+          'Use the exact Godot API names (case-sensitive)',
+          'Search for related terms if unsure',
+        ];
+
+        if (suggestions.length > 0) {
+          solutions.push('', 'Did you mean:', ...suggestions.map(s => `- ${s}`));
+        }
+        
+        return this.createErrorResponse(
+          result.error || 'Not found',
+          solutions
+        );
+      }
+
+      // Format the result
+      let responseText = '';
+
+      if (result.class) {
+        const classInfo = result.class;
+        responseText += `## ${classInfo.name}\n\n`;
+        
+        if (classInfo.extends) {
+          responseText += `**Extends:** ${classInfo.extends}\n\n`;
+        }
+
+        if (classInfo.brief_description) {
+          responseText += `${classInfo.brief_description}\n\n`;
+        }
+
+        if (classInfo.description && classInfo.description !== classInfo.brief_description) {
+          responseText += `**Description:**\n${classInfo.description}\n\n`;
+        }
+
+        // If querying a specific member
+        if (result.member && result.memberType) {
+          const member = result.member;
+          responseText += `---\n\n### ${result.memberType}: ${member.name}\n\n`;
+          
+          if (member.description) {
+            responseText += `${member.description}\n\n`;
+          }
+
+          // Type-specific details
+          if (result.memberType === 'method') {
+            const method = member as any;
+            if (method.return_type) {
+              responseText += `**Returns:** ${method.return_type}\n\n`;
+            }
+            if (method.arguments && method.arguments.length > 0) {
+              responseText += `**Arguments:**\n`;
+              for (const arg of method.arguments) {
+                const defaultVal = arg.default_value ? ` = ${arg.default_value}` : '';
+                responseText += `- ${arg.name}: ${arg.type}${defaultVal}\n`;
+              }
+              responseText += '\n';
+            }
+            if (method.is_virtual) {
+              responseText += `*This is a virtual method - override it in your script*\n\n`;
+            }
+          } else if (result.memberType === 'property') {
+            const prop = member as any;
+            if (prop.type) responseText += `**Type:** ${prop.type}\n\n`;
+            if (prop.default_value) responseText += `**Default:** ${prop.default_value}\n\n`;
+          } else if (result.memberType === 'signal') {
+            const signal = member as any;
+            if (signal.arguments && signal.arguments.length > 0) {
+              responseText += `**Arguments:**\n`;
+              for (const arg of signal.arguments) {
+                responseText += `- ${arg.name}: ${arg.type}\n`;
+              }
+              responseText += '\n';
+            }
+          }
+        } else {
+          // List available members
+          const methods = classInfo.methods || [];
+          const properties = classInfo.properties || [];
+          const signals = classInfo.signals || [];
+
+          if (methods.length > 0) {
+            responseText += `**Methods (${methods.length}):**\n`;
+            const methodNames = methods.slice(0, 10).map(m => m.name);
+            responseText += methodNames.join(', ');
+            if (methods.length > 10) responseText += `, ... and ${methods.length - 10} more`;
+            responseText += '\n\n';
+          }
+
+          if (properties.length > 0) {
+            responseText += `**Properties (${properties.length}):**\n`;
+            const propNames = properties.slice(0, 10).map(p => p.name);
+            responseText += propNames.join(', ');
+            if (properties.length > 10) responseText += `, ... and ${properties.length - 10} more`;
+            responseText += '\n\n';
+          }
+
+          if (signals.length > 0) {
+            responseText += `**Signals (${signals.length}):**\n`;
+            const signalNames = signals.map(s => s.name);
+            responseText += signalNames.join(', ');
+            responseText += '\n\n';
+          }
+
+          responseText += `*Use memberName parameter to get details about a specific method, property, or signal.*`;
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to query documentation: ${error?.message || 'Unknown error'}`,
+        [
+          'Documentation may not be downloaded yet',
+          'Check your internet connection for first-time setup',
+          'Try specifying a different Godot version',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the validate_api tool
+   */
+  private async handleValidateApi(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.className || !args.memberName) {
+      return this.createErrorResponse(
+        'Class name and member name are required',
+        ['Provide both className and memberName to validate']
+      );
+    }
+
+    try {
+      // Initialize docs if needed
+      const initialized = await this.ensureDocsInitialized(args.godotVersion);
+      if (!initialized || !this.docManager) {
+        return this.createErrorResponse(
+          'Documentation not available',
+          ['Failed to initialize documentation manager']
+        );
+      }
+
+      this.logDebug(`Validating API: ${args.className}.${args.memberName}`);
+
+      // Validate the API
+      const result = this.docManager.validate(
+        args.className,
+        args.memberName,
+        args.usage
+      );
+
+      let responseText = '';
+
+      if (result.valid) {
+        responseText = `✅ **Valid API**\n\n`;
+        responseText += `${args.className}.${args.memberName} exists and is correctly used.\n\n`;
+        
+        if (result.suggestions && result.suggestions.length > 0) {
+          responseText += `**Tips:**\n`;
+          for (const suggestion of result.suggestions) {
+            responseText += `- ${suggestion}\n`;
+          }
+        }
+      } else {
+        responseText = `❌ **API Validation Failed**\n\n`;
+        
+        if (result.issues && result.issues.length > 0) {
+          responseText += `**Issues:**\n`;
+          for (const issue of result.issues) {
+            responseText += `- ${issue}\n`;
+          }
+          responseText += '\n';
+        }
+
+        if (result.suggestions && result.suggestions.length > 0) {
+          responseText += `**Did you mean:**\n`;
+          for (const suggestion of result.suggestions) {
+            responseText += `- ${suggestion}\n`;
+          }
+          responseText += '\n';
+        }
+
+        if (result.corrected) {
+          responseText += `**Suggested correction:**\n\`${result.corrected}\`\n`;
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+        isError: !result.valid,
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to validate API: ${error?.message || 'Unknown error'}`,
+        [
+          'Documentation may not be available',
+          'Check your internet connection for first-time setup',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the connect_signal tool
+   */
+  private async handleConnectSignal(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath || !args.scenePath || !args.nodePath || !args.signalName || !args.targetPath || !args.methodName) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath, scenePath, nodePath, signalName, targetPath, and methodName']
+      );
+    }
+
+    if (
+      !this.validatePath(args.projectPath) ||
+      !this.validatePath(args.scenePath) ||
+      !this.validatePath(args.nodePath) ||
+      !this.validatePath(args.targetPath)
+    ) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      // Check if the project directory exists and contains a project.godot file
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      // Check if the scene file exists
+      const scenePath = join(args.projectPath, args.scenePath);
+      if (!existsSync(scenePath)) {
+        return this.createErrorResponse(
+          `Scene file does not exist: ${args.scenePath}`,
+          [
+            'Ensure the scene path is correct',
+            'Use create_scene to create a new scene first',
+          ]
+        );
+      }
+
+      // Validate signal name format
+      if (!args.signalName.match(/^[a-zA-Z_][a-zA-Z0-9_]*$/)) {
+        return this.createErrorResponse(
+          'Invalid signal name format',
+          ['Signal names must start with a letter or underscore and contain only letters, numbers, and underscores']
+        );
+      }
+
+      // Validate method name format
+      if (!args.methodName.match(/^[a-zA-Z_][a-zA-Z0-9_]*$/)) {
+        return this.createErrorResponse(
+          'Invalid method name format',
+          ['Method names must start with a letter or underscore and contain only letters, numbers, and underscores']
+        );
+      }
+
+      // Prepare parameters for the operation
+      const params: any = {
+        scenePath: args.scenePath,
+        nodePath: args.nodePath,
+        signalName: args.signalName,
+        targetPath: args.targetPath,
+        methodName: args.methodName,
+      };
+
+      // Add optional parameters
+      if (args.flags !== undefined) {
+        params.flags = args.flags;
+      }
+
+      this.logDebug(`Connecting signal ${args.signalName} on ${args.nodePath} to ${args.targetPath}.${args.methodName}`);
+
+      // Execute the operation
+      const { stdout, stderr } = await this.executeOperation('connect_signal', params, args.projectPath);
+
+      if (stderr && stderr.includes('Failed to')) {
+        return this.createErrorResponse(
+          `Failed to connect signal: ${stderr}`,
+          [
+            'Check if the signal name is correct (use query_documentation to verify)',
+            'Ensure the node path is correct',
+            'Verify the target node has the specified method',
+            'Check if signal and method signatures are compatible',
+          ]
+        );
+      }
+
+      // Parse the result JSON
+      let resultText = stdout.trim();
+      try {
+        const result = JSON.parse(resultText);
+        if (result.success) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Signal connected successfully!\n\nSignal: ${result.signal_name}\nSource: ${result.source_node}\nTarget: ${result.target_node}.${result.method_name}\n\nThe connection is now saved in the scene file and will be restored when the scene loads.`,
+              },
+            ],
+          };
+        }
+      } catch (e) {
+        // JSON parsing failed, use raw output
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Signal connected.\n\nOutput: ${resultText}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to connect signal: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Check if the GODOT_PATH environment variable is set correctly',
+          'Verify the project path is accessible',
+          'Make sure the scene file is valid',
+          'Check if the signal exists on the specified node (use query_documentation)',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the set_node_property tool
+   */
+  private async handleSetNodeProperty(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath || !args.scenePath || !args.nodePath || !args.propertyPath || args.propertyValue === undefined) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath, scenePath, nodePath, propertyPath, and propertyValue']
+      );
+    }
+
+    if (
+      !this.validatePath(args.projectPath) ||
+      !this.validatePath(args.scenePath) ||
+      !this.validatePath(args.nodePath) ||
+      !this.validatePath(args.propertyPath)
+    ) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      // Check if the project directory exists and contains a project.godot file
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      // Check if the scene file exists
+      const scenePath = join(args.projectPath, args.scenePath);
+      if (!existsSync(scenePath)) {
+        return this.createErrorResponse(
+          `Scene file does not exist: ${args.scenePath}`,
+          [
+            'Ensure the scene path is correct',
+            'Use create_scene to create a new scene first',
+          ]
+        );
+      }
+
+      // Prepare parameters for the operation
+      const params = {
+        scenePath: args.scenePath,
+        nodePath: args.nodePath,
+        property_path: args.propertyPath,
+        property_value: args.propertyValue,
+      };
+
+      this.logDebug(`Setting property ${args.propertyPath} = ${args.propertyValue} on ${args.nodePath}`);
+
+      // Execute the operation
+      const { stdout, stderr } = await this.executeOperation('set_node_property', params, args.projectPath);
+
+      if (stderr && stderr.includes('Failed to')) {
+        return this.createErrorResponse(
+          `Failed to set property: ${stderr}`,
+          [
+            'Check if the property path is correct',
+            'Verify the property value format matches the expected type',
+            'For Vector2: use "Vector2(100, 200)" or "(100, 200)"',
+            'For Color: use "Color.red", "Color(1, 0, 0)", or "#ff0000"',
+            'For sub-properties: use "position:x" to set just the x coordinate',
+          ]
+        );
+      }
+
+      // Parse the result JSON
+      let resultText = stdout.trim();
+      try {
+        const result = JSON.parse(resultText);
+        if (result.success) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Property set successfully!\n\nNode: ${result.node_path}\nProperty: ${result.property_path}\nValue: ${result.property_value}\n\nThe change is now saved in the scene file.`,
+              },
+            ],
+          };
+        }
+      } catch (e) {
+        // JSON parsing failed, use raw output
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Property set.\n\nOutput: ${resultText}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to set property: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Check if the GODOT_PATH environment variable is set correctly',
+          'Verify the project path is accessible',
+          'Make sure the scene file is valid',
+          'Check property value format (numbers, strings, Vector2, Color)',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the delete_node tool
+   */
+  private async handleDeleteNode(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath || !args.scenePath || !args.nodePath) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath, scenePath, and nodePath']
+      );
+    }
+
+    if (
+      !this.validatePath(args.projectPath) ||
+      !this.validatePath(args.scenePath) ||
+      !this.validatePath(args.nodePath)
+    ) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    // Prevent deleting root node
+    if (args.nodePath === 'root' || args.nodePath === '.' || args.nodePath === '') {
+      return this.createErrorResponse(
+        'Cannot delete root node',
+        [
+          'Use delete_scene to delete the entire scene file',
+          'Or delete child nodes individually',
+        ]
+      );
+    }
+
+    try {
+      // Check if the project directory exists and contains a project.godot file
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      // Check if the scene file exists
+      const scenePath = join(args.projectPath, args.scenePath);
+      if (!existsSync(scenePath)) {
+        return this.createErrorResponse(
+          `Scene file does not exist: ${args.scenePath}`,
+          [
+            'Ensure the scene path is correct',
+            'Use create_scene to create a new scene first',
+          ]
+        );
+      }
+
+      // Prepare parameters for the operation
+      const params = {
+        scenePath: args.scenePath,
+        nodePath: args.nodePath,
+      };
+
+      this.logDebug(`Deleting node ${args.nodePath} from ${args.scenePath}`);
+
+      // Execute the operation
+      const { stdout, stderr } = await this.executeOperation('delete_node', params, args.projectPath);
+
+      if (stderr && stderr.includes('Failed to')) {
+        return this.createErrorResponse(
+          `Failed to delete node: ${stderr}`,
+          [
+            'Check if the node path is correct',
+            'Ensure the node exists in the scene',
+            'Root node cannot be deleted (delete the scene file instead)',
+          ]
+        );
+      }
+
+      // Parse the result JSON
+      let resultText = stdout.trim();
+      try {
+        const result = JSON.parse(resultText);
+        if (result.success) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Node deleted successfully!\n\nDeleted: ${result.deleted_node}\nParent: ${result.parent_node}\nScene: ${result.scene_path}`,
+              },
+            ],
+          };
+        }
+      } catch (e) {
+        // JSON parsing failed, use raw output
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Node deleted.\n\nOutput: ${resultText}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to delete node: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Check if the GODOT_PATH environment variable is set correctly',
+          'Verify the project path is accessible',
+          'Make sure the scene file is valid',
+          'Ensure the node exists in the scene',
         ]
       );
     }

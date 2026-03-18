@@ -71,6 +71,16 @@ func _init():
             get_uid(params)
         "resave_resources":
             resave_resources(params)
+        "capture_screenshot":
+            capture_screenshot(params)
+        "attach_script":
+            attach_script(params)
+        "connect_signal":
+            connect_signal(params)
+        "set_node_property":
+            set_node_property(params)
+        "delete_node":
+            delete_node(params)
         _:
             log_error("Unknown operation: " + operation)
             quit(1)
@@ -1190,3 +1200,859 @@ func save_scene(params):
             printerr("Failed to save scene: " + str(error))
     else:
         printerr("Failed to pack scene: " + str(result))
+
+
+# Capture a screenshot of a scene
+func capture_screenshot(params):
+    print("Capturing screenshot...")
+    
+    # Get parameters
+    var scene_path = params.scene_path
+    var output_path = params.output_path
+    var width = params.get("width", 1920)
+    var height = params.get("height", 1080)
+    var delay = params.get("delay", 0.5)  # 延迟秒数，等待场景稳定
+    
+    # Ensure paths start with res://
+    if not scene_path.begins_with("res://"):
+        scene_path = "res://" + scene_path
+    if not output_path.begins_with("res://"):
+        output_path = "res://" + output_path
+    
+    if debug_mode:
+        print("Scene path: " + scene_path)
+        print("Output path: " + output_path)
+        print("Resolution: " + str(width) + "x" + str(height))
+        print("Delay: " + str(delay) + "s")
+    
+    # Check if scene file exists
+    if not FileAccess.file_exists(scene_path):
+        printerr("Scene file does not exist at: " + scene_path)
+        quit(1)
+    
+    # Load the scene
+    var scene = load(scene_path)
+    if not scene:
+        printerr("Failed to load scene: " + scene_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Scene loaded successfully")
+    
+    # Instance the scene
+    var instance = scene.instantiate()
+    if debug_mode:
+        print("Scene instantiated")
+    
+    # Create a SubViewport for rendering
+    var viewport = SubViewport.new()
+    viewport.size = Vector2(width, height)
+    viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+    viewport.transparent_bg = params.get("transparent_bg", false)
+    
+    # Enable 2D and 3D rendering as needed
+    viewport.disable_3d = params.get("disable_3d", false)
+    viewport.own_world_3d = true
+    
+    # Add instance to viewport
+    viewport.add_child(instance)
+    
+    # Add viewport to tree temporarily
+    root.add_child(viewport)
+    
+    if debug_mode:
+        print("Viewport created and scene added")
+    
+    # Wait for specified delay (convert to milliseconds)
+    var delay_ms = int(delay * 1000)
+    if debug_mode:
+        print("Waiting " + str(delay_ms) + "ms for scene to stabilize...")
+    
+    OS.delay_msec(delay_ms)
+    
+    # Force render
+    viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+    
+    # Wait a frame for rendering to complete
+    await root.get_tree().process_frame
+    
+    if debug_mode:
+        print("Rendering complete, capturing image...")
+    
+    # Get the image from viewport texture
+    var image = viewport.get_texture().get_image()
+    if not image:
+        printerr("Failed to capture image from viewport")
+        viewport.queue_free()
+        quit(1)
+    
+    if debug_mode:
+        print("Image captured, size: " + str(image.get_size()))
+    
+    # Ensure output directory exists
+    var output_dir = output_path.get_base_dir()
+    if output_dir != "res://":
+        var dir = DirAccess.open("res://")
+        if dir:
+            var rel_dir = output_dir.substr(6)  # Remove "res://"
+            if not dir.dir_exists(rel_dir):
+                if debug_mode:
+                    print("Creating output directory: " + rel_dir)
+                var err = dir.make_dir_recursive(rel_dir)
+                if err != OK:
+                    printerr("Failed to create directory: " + rel_dir)
+        else:
+            printerr("Failed to open res:// directory")
+    
+    # Save the image
+    var global_output_path = ProjectSettings.globalize_path(output_path)
+    var err = image.save_png(global_output_path)
+    
+    if err == OK:
+        if debug_mode:
+            print("Screenshot saved to: " + output_path)
+            print("Absolute path: " + global_output_path)
+        
+        # Verify file was created
+        if FileAccess.file_exists(output_path):
+            var result = {
+                "success": true,
+                "path": output_path,
+                "absolute_path": global_output_path,
+                "size": image.get_size()
+            }
+            print(JSON.stringify(result))
+        else:
+            printerr("File was not created at: " + output_path)
+    else:
+        printerr("Failed to save screenshot. Error code: " + str(err))
+    
+    # Cleanup
+    viewport.queue_free()
+    
+    if debug_mode:
+        print("Screenshot capture complete")
+
+
+# Attach a script to a node in a scene
+func attach_script(params):
+    print("Attaching script to node...")
+    
+    # Get parameters
+    var scene_path = params.scene_path
+    var node_path = params.node_path
+    var script_path = params.script_path
+    
+    # Ensure paths start with res://
+    if not scene_path.begins_with("res://"):
+        scene_path = "res://" + scene_path
+    if not script_path.begins_with("res://"):
+        script_path = "res://" + script_path
+    
+    if debug_mode:
+        print("Scene path: " + scene_path)
+        print("Node path: " + node_path)
+        print("Script path: " + script_path)
+    
+    # Check if scene file exists
+    if not FileAccess.file_exists(scene_path):
+        printerr("Scene file does not exist at: " + scene_path)
+        quit(1)
+    
+    # Check if script file exists
+    if not FileAccess.file_exists(script_path):
+        printerr("Script file does not exist at: " + script_path)
+        printerr("Please create the script file first before attaching")
+        quit(1)
+    
+    # Load the scene
+    var scene = load(scene_path)
+    if not scene:
+        printerr("Failed to load scene: " + scene_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Scene loaded successfully")
+    
+    # Instance the scene to edit
+    var scene_root = scene.instantiate()
+    if debug_mode:
+        print("Scene instantiated")
+    
+    # Find the target node
+    var target_node = null
+    
+    if node_path == "root" or node_path == ".":
+        target_node = scene_root
+        if debug_mode:
+            print("Using root node as target")
+    else:
+        # Remove "root/" prefix if present
+        var search_path = node_path
+        if search_path.begins_with("root/"):
+            search_path = search_path.substr(5)  # Remove "root/"
+        elif search_path.begins_with("root"):
+            search_path = search_path.substr(4)  # Remove "root"
+        
+        if debug_mode:
+            print("Searching for node at path: " + search_path)
+        
+        if search_path.is_empty():
+            target_node = scene_root
+        else:
+            target_node = scene_root.get_node(search_path)
+    
+    if not target_node:
+        printerr("Node not found: " + node_path)
+        printerr("Available children of root: " + str(scene_root.get_children()))
+        quit(1)
+    
+    if debug_mode:
+        print("Found target node: " + target_node.name + " (type: " + target_node.get_class() + ")")
+    
+    # Load the script
+    var script = load(script_path)
+    if not script:
+        printerr("Failed to load script: " + script_path)
+        quit(1)
+    
+    if not (script is GDScript or script is CSharpScript):
+        printerr("File is not a valid script: " + script_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Script loaded successfully: " + script_path)
+    
+    # Check if node already has a script
+    var existing_script = target_node.get_script()
+    if existing_script:
+        if debug_mode:
+            print("Node already has a script, will be replaced")
+    
+    # Attach the script
+    target_node.set_script(script)
+    
+    if debug_mode:
+        print("Script attached to node")
+    
+    # Verify attachment
+    var attached_script = target_node.get_script()
+    if attached_script == script:
+        if debug_mode:
+            print("Script attachment verified")
+    else:
+        printerr("Script attachment failed - script not found on node after setting")
+        quit(1)
+    
+    # Pack and save the scene
+    var packed_scene = PackedScene.new()
+    var pack_result = packed_scene.pack(scene_root)
+    
+    if pack_result != OK:
+        printerr("Failed to pack scene: " + str(pack_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene packed successfully")
+    
+    # Save the scene
+    var save_result = ResourceSaver.save(packed_scene, scene_path)
+    
+    if save_result != OK:
+        printerr("Failed to save scene: " + str(save_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene saved successfully")
+        
+        # Verify file exists
+        var file_check = FileAccess.file_exists(scene_path)
+        print("File exists check: " + str(file_check))
+    
+    # Return success result
+    var result = {
+        "success": true,
+        "scene_path": scene_path,
+        "node_path": node_path,
+        "script_path": script_path,
+        "node_type": target_node.get_class()
+    }
+    print(JSON.stringify(result))
+    
+    # Cleanup
+    scene_root.free()
+    
+    if debug_mode:
+        print("Script attached successfully to " + node_path)
+
+
+# Connect a signal to a method in a scene
+func connect_signal(params):
+    print("Connecting signal...")
+    
+    # Get parameters
+    var scene_path = params.scene_path
+    var node_path = params.node_path
+    var signal_name = params.signal_name
+    var target_path = params.target_path
+    var method_name = params.method_name
+    var flags = params.get("flags", 0)
+    
+    # Ensure paths start with res://
+    if not scene_path.begins_with("res://"):
+        scene_path = "res://" + scene_path
+    
+    if debug_mode:
+        print("Scene path: " + scene_path)
+        print("Node path: " + node_path)
+        print("Signal name: " + signal_name)
+        print("Target path: " + target_path)
+        print("Method name: " + method_name)
+    
+    # Check if scene file exists
+    if not FileAccess.file_exists(scene_path):
+        printerr("Scene file does not exist at: " + scene_path)
+        quit(1)
+    
+    # Load the scene
+    var scene = load(scene_path)
+    if not scene:
+        printerr("Failed to load scene: " + scene_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Scene loaded successfully")
+    
+    # Instance the scene to edit
+    var scene_root = scene.instantiate()
+    if debug_mode:
+        print("Scene instantiated")
+    
+    # Find the source node (the one with the signal)
+    var source_node = null
+    if node_path == "root" or node_path == ".":
+        source_node = scene_root
+    else:
+        var search_path = node_path
+        if search_path.begins_with("root/"):
+            search_path = search_path.substr(5)
+        elif search_path.begins_with("root"):
+            search_path = search_path.substr(4)
+        
+        if not search_path.is_empty():
+            source_node = scene_root.get_node(search_path)
+        else:
+            source_node = scene_root
+    
+    if not source_node:
+        printerr("Source node not found: " + node_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Found source node: " + source_node.name)
+    
+    # Check if signal exists
+    var has_signal = false
+    var signal_list = source_node.get_signal_list()
+    for sig in signal_list:
+        if sig["name"] == signal_name:
+            has_signal = true
+            break
+    
+    if not has_signal:
+        printerr("Signal '" + signal_name + "' not found on node: " + node_path)
+        printerr("Available signals: " + str(signal_list.map(func(s): return s["name"])))
+        quit(1)
+    
+    if debug_mode:
+        print("Signal verified: " + signal_name)
+    
+    # Find the target node (the one with the method)
+    var target_node = null
+    if target_path == "root" or target_path == "." or target_path == node_path:
+        target_node = source_node
+    else:
+        var target_search_path = target_path
+        if target_search_path.begins_with("root/"):
+            target_search_path = target_search_path.substr(5)
+        elif target_search_path.begins_with("root"):
+            target_search_path = target_search_path.substr(4)
+        
+        if not target_search_path.is_empty():
+            target_node = scene_root.get_node(target_search_path)
+        else:
+            target_node = scene_root
+    
+    if not target_node:
+        printerr("Target node not found: " + target_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Found target node: " + target_node.name)
+    
+    # Check if method exists on target
+    var has_method = target_node.has_method(method_name)
+    if not has_method:
+        # If target has a script, the method might be in the script
+        # We can't fully validate this without the script being compiled
+        # but we'll allow it and let Godot handle the error at runtime
+        if debug_mode:
+            print("Warning: Method '" + method_name + "' not found on target node, but it may be defined in the attached script")
+    else:
+        if debug_mode:
+            print("Method verified: " + method_name)
+    
+    # Create the callable
+    var callable = Callable(target_node, method_name)
+    
+    # Connect the signal
+    var connect_result = OK
+    if source_node.is_connected(signal_name, callable):
+        if debug_mode:
+            print("Signal already connected, disconnecting first...")
+        source_node.disconnect(signal_name, callable)
+    
+    connect_result = source_node.connect(signal_name, callable, flags)
+    
+    if connect_result != OK:
+        printerr("Failed to connect signal. Error code: " + str(connect_result))
+        if connect_result == ERR_INVALID_PARAMETER:
+            printerr("Invalid parameter - check signal and method signatures match")
+        elif connect_result == ERR_ALREADY_EXISTS:
+            printerr("Connection already exists")
+        quit(1)
+    
+    if debug_mode:
+        print("Signal connected successfully")
+    
+    # Pack and save the scene
+    var packed_scene = PackedScene.new()
+    var pack_result = packed_scene.pack(scene_root)
+    
+    if pack_result != OK:
+        printerr("Failed to pack scene: " + str(pack_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene packed successfully")
+    
+    # Save the scene
+    var save_result = ResourceSaver.save(packed_scene, scene_path)
+    
+    if save_result != OK:
+        printerr("Failed to save scene: " + str(save_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene saved successfully")
+    
+    # Return success result
+    var result = {
+        "success": true,
+        "scene_path": scene_path,
+        "source_node": node_path,
+        "signal_name": signal_name,
+        "target_node": target_path,
+        "method_name": method_name
+    }
+    print(JSON.stringify(result))
+    
+    # Cleanup
+    scene_root.free()
+    
+    if debug_mode:
+        print("Signal connection complete: " + signal_name + " -> " + method_name)
+
+
+# Set a property on a node in a scene
+func set_node_property(params):
+    print("Setting node property...")
+    
+    # Get parameters
+    var scene_path = params.scene_path
+    var node_path = params.node_path
+    var property_path = params.property_path
+    var property_value = params.property_value
+    
+    # Ensure paths start with res://
+    if not scene_path.begins_with("res://"):
+        scene_path = "res://" + scene_path
+    
+    if debug_mode:
+        print("Scene path: " + scene_path)
+        print("Node path: " + node_path)
+        print("Property path: " + property_path)
+        print("Property value: " + str(property_value))
+    
+    # Check if scene file exists
+    if not FileAccess.file_exists(scene_path):
+        printerr("Scene file does not exist at: " + scene_path)
+        quit(1)
+    
+    # Load the scene
+    var scene = load(scene_path)
+    if not scene:
+        printerr("Failed to load scene: " + scene_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Scene loaded successfully")
+    
+    # Instance the scene to edit
+    var scene_root = scene.instantiate()
+    if debug_mode:
+        print("Scene instantiated")
+    
+    # Find the target node
+    var target_node = null
+    if node_path == "root" or node_path == ".":
+        target_node = scene_root
+    else:
+        var search_path = node_path
+        if search_path.begins_with("root/"):
+            search_path = search_path.substr(5)
+        elif search_path.begins_with("root"):
+            search_path = search_path.substr(4)
+        
+        if not search_path.is_empty():
+            target_node = scene_root.get_node(search_path)
+        else:
+            target_node = scene_root
+    
+    if not target_node:
+        printerr("Node not found: " + node_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Found target node: " + target_node.name + " (type: " + target_node.get_class() + ")")
+    
+    # Parse and set the property value
+    var parsed_value = parse_property_value(property_value)
+    
+    if debug_mode:
+        print("Parsed value: " + str(parsed_value) + " (type: " + typeof(parsed_value) + ")")
+    
+    # Handle nested property paths (e.g., "position:x" or "theme_override_colors/font_color")
+    var property_parts = property_path.split(":")
+    if property_parts.size() == 2:
+        # Handle "position:x" style notation
+        var main_prop = property_parts[0]
+        var sub_prop = property_parts[1]
+        
+        var current_value = target_node.get(main_prop)
+        if current_value == null:
+            printerr("Property '" + main_prop + "' not found on node")
+            quit(1)
+        
+        # Set the sub-property
+        if current_value is Vector2:
+            if sub_prop == "x":
+                target_node.set(main_prop, Vector2(parsed_value, current_value.y))
+            elif sub_prop == "y":
+                target_node.set(main_prop, Vector2(current_value.x, parsed_value))
+            else:
+                printerr("Invalid sub-property for Vector2: " + sub_prop)
+                quit(1)
+        elif current_value is Vector3:
+            if sub_prop == "x":
+                target_node.set(main_prop, Vector3(parsed_value, current_value.y, current_value.z))
+            elif sub_prop == "y":
+                target_node.set(main_prop, Vector3(current_value.x, parsed_value, current_value.z))
+            elif sub_prop == "z":
+                target_node.set(main_prop, Vector3(current_value.x, current_value.y, parsed_value))
+            else:
+                printerr("Invalid sub-property for Vector3: " + sub_prop)
+                quit(1)
+        elif current_value is Color:
+            if sub_prop == "r":
+                target_node.set(main_prop, Color(parsed_value, current_value.g, current_value.b, current_value.a))
+            elif sub_prop == "g":
+                target_node.set(main_prop, Color(current_value.r, parsed_value, current_value.b, current_value.a))
+            elif sub_prop == "b":
+                target_node.set(main_prop, Color(current_value.r, current_value.g, parsed_value, current_value.a))
+            elif sub_prop == "a":
+                target_node.set(main_prop, Color(current_value.r, current_value.g, current_value.b, parsed_value))
+            elif sub_prop == "h":
+                var hsv = current_value.to_hsv()
+                target_node.set(main_prop, Color.from_hsv(parsed_value, hsv.y, hsv.z, current_value.a))
+            elif sub_prop == "s":
+                var hsv = current_value.to_hsv()
+                target_node.set(main_prop, Color.from_hsv(hsv.x, parsed_value, hsv.z, current_value.a))
+            elif sub_prop == "v":
+                var hsv = current_value.to_hsv()
+                target_node.set(main_prop, Color.from_hsv(hsv.x, hsv.y, parsed_value, current_value.a))
+            else:
+                printerr("Invalid sub-property for Color: " + sub_prop)
+                quit(1)
+        elif current_value is Rect2:
+            if sub_prop == "x":
+                target_node.set(main_prop, Rect2(Vector2(parsed_value, current_value.position.y), current_value.size))
+            elif sub_prop == "y":
+                target_node.set(main_prop, Rect2(Vector2(current_value.position.x, parsed_value), current_value.size))
+            elif sub_prop == "width" or sub_prop == "w":
+                target_node.set(main_prop, Rect2(current_value.position, Vector2(parsed_value, current_value.size.y)))
+            elif sub_prop == "height" or sub_prop == "h":
+                target_node.set(main_prop, Rect2(current_value.position, Vector2(current_value.size.x, parsed_value)))
+            else:
+                printerr("Invalid sub-property for Rect2: " + sub_prop)
+                quit(1)
+        else:
+            printerr("Cannot set sub-property on type: " + str(typeof(current_value)))
+            quit(1)
+    else:
+        # Handle theme override properties (which use "/" separator)
+        if property_path.begins_with("theme_override_"):
+            target_node.set_indexed(property_path, parsed_value)
+        else:
+            # Set the property directly
+            target_node.set(property_path, parsed_value)
+    
+    if debug_mode:
+        print("Property set successfully")
+    
+    # Pack and save the scene
+    var packed_scene = PackedScene.new()
+    var pack_result = packed_scene.pack(scene_root)
+    
+    if pack_result != OK:
+        printerr("Failed to pack scene: " + str(pack_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene packed successfully")
+    
+    # Save the scene
+    var save_result = ResourceSaver.save(packed_scene, scene_path)
+    
+    if save_result != OK:
+        printerr("Failed to save scene: " + str(save_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene saved successfully")
+    
+    # Return success result
+    var result = {
+        "success": true,
+        "scene_path": scene_path,
+        "node_path": node_path,
+        "property_path": property_path,
+        "property_value": str(parsed_value)
+    }
+    print(JSON.stringify(result))
+    
+    # Cleanup
+    scene_root.free()
+    
+    if debug_mode:
+        print("Property set complete: " + property_path + " = " + str(parsed_value))
+
+# Parse a property value from string or JSON to Godot type
+func parse_property_value(value):
+    # Handle different types of input
+    
+    # If it's already a number, bool, or null, return as-is
+    if typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
+        return value
+    if typeof(value) == TYPE_BOOL:
+        return value
+    if typeof(value) == TYPE_NIL:
+        return null
+    
+    # If it's not a string, convert to string first
+    var str_value = str(value)
+    
+    # Try to parse Vector2 (e.g., "Vector2(100, 200)" or "(100, 200)")
+    var vector2_match = str_value.match(r"^\\s*(?:Vector2)?\\s*\\(\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*\\)\\s*$")
+    if vector2_match:
+        return Vector2(float(vector2_match[1]), float(vector2_match[2]))
+    
+    # Try to parse Vector3
+    var vector3_match = str_value.match(r"^\\s*(?:Vector3)?\\s*\\(\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*\\)\\s*$")
+    if vector3_match:
+        return Vector3(float(vector3_match[1]), float(vector3_match[2]), float(vector3_match[3]))
+    
+    # Try to parse Color (e.g., "Color.red", "Color(1, 0, 0)", "#ff0000")
+    if str_value.begins_with("Color."):
+        var color_name = str_value.substr(6)
+        match color_name:
+            "white": return Color.WHITE
+            "black": return Color.BLACK
+            "red": return Color.RED
+            "green": return Color.GREEN
+            "blue": return Color.BLUE
+            "yellow": return Color.YELLOW
+            "cyan": return Color.CYAN
+            "magenta": return Color.MAGENTA
+            "orange": return Color.ORANGE
+            "gray": return Color.GRAY
+            "transparent": return Color.TRANSPARENT
+            _:
+                printerr("Unknown color name: " + color_name)
+    
+    var color_match = str_value.match(r"^\\s*Color\\s*\\(\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*(?:,\\s*([+-]?\\d+\\.?\\d*)\\s*)?\\)\\s*$")
+    if color_match:
+        var r = float(color_match[1])
+        var g = float(color_match[2])
+        var b = float(color_match[3])
+        var a = float(color_match[4]) if color_match[4] else 1.0
+        return Color(r, g, b, a)
+    
+    # Try hex color (e.g., "#ff0000" or "#ff0000ff")
+    if str_value.begins_with("#") and (str_value.length() == 7 or str_value.length() == 9):
+        var hex = str_value.substr(1)
+        if hex.is_valid_hex_number():
+            var r = hex.substr(0, 2).hex_to_int() / 255.0
+            var g = hex.substr(2, 2).hex_to_int() / 255.0
+            var b = hex.substr(4, 2).hex_to_int() / 255.0
+            var a = 1.0
+            if hex.length() == 8:
+                a = hex.substr(6, 2).hex_to_int() / 255.0
+            return Color(r, g, b, a)
+    
+    # Try to parse boolean
+    if str_value.to_lower() == "true":
+        return true
+    if str_value.to_lower() == "false":
+        return false
+    
+    # Try to parse number
+    if str_value.is_valid_float():
+        var num = float(str_value)
+        # Return as int if it's a whole number
+        if num == int(num):
+            return int(num)
+        return num
+    
+    # Return as string
+    return str_value
+
+
+# Delete a node from a scene
+func delete_node(params):
+    print("Deleting node...")
+    
+    # Get parameters
+    var scene_path = params.scene_path
+    var node_path = params.node_path
+    
+    # Ensure paths start with res://
+    if not scene_path.begins_with("res://"):
+        scene_path = "res://" + scene_path
+    
+    if debug_mode:
+        print("Scene path: " + scene_path)
+        print("Node path to delete: " + node_path)
+    
+    # Check if scene file exists
+    if not FileAccess.file_exists(scene_path):
+        printerr("Scene file does not exist at: " + scene_path)
+        quit(1)
+    
+    # Load the scene
+    var scene = load(scene_path)
+    if not scene:
+        printerr("Failed to load scene: " + scene_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Scene loaded successfully")
+    
+    # Instance the scene to edit
+    var scene_root = scene.instantiate()
+    if debug_mode:
+        print("Scene instantiated")
+    
+    # Find the node to delete
+    var target_node = null
+    var parent_node = null
+    
+    if node_path == "root" or node_path == ".":
+        printerr("Cannot delete root node. Delete the entire scene file instead.")
+        quit(1)
+    else:
+        var search_path = node_path
+        if search_path.begins_with("root/"):
+            search_path = search_path.substr(5)
+        elif search_path.begins_with("root"):
+            search_path = search_path.substr(4)
+        
+        if search_path.is_empty():
+            printerr("Cannot delete root node. Delete the entire scene file instead.")
+            quit(1)
+        
+        # Get the parent path
+        var path_parts = search_path.split("/")
+        if path_parts.size() == 1:
+            # Direct child of root
+            parent_node = scene_root
+        else:
+            # Nested child
+            var parent_path = "/".join(path_parts.slice(0, path_parts.size() - 1))
+            parent_node = scene_root.get_node(parent_path)
+        
+        var node_name = path_parts[path_parts.size() - 1]
+        
+        if parent_node:
+            target_node = parent_node.get_node_or_null(node_name)
+        
+        if not target_node:
+            # Try direct path lookup
+            target_node = scene_root.get_node_or_null(search_path)
+            if target_node:
+                parent_node = target_node.get_parent()
+    
+    if not target_node:
+        printerr("Node not found: " + node_path)
+        quit(1)
+    
+    if not parent_node:
+        printerr("Cannot determine parent of node: " + node_path)
+        quit(1)
+    
+    if debug_mode:
+        print("Found target node: " + target_node.name)
+        print("Parent node: " + parent_node.name)
+    
+    # Remove the node from its parent
+    parent_node.remove_child(target_node)
+    target_node.queue_free()
+    
+    if debug_mode:
+        print("Node removed from scene tree")
+    
+    # Pack and save the scene
+    var packed_scene = PackedScene.new()
+    var pack_result = packed_scene.pack(scene_root)
+    
+    if pack_result != OK:
+        printerr("Failed to pack scene: " + str(pack_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene packed successfully")
+    
+    # Save the scene
+    var save_result = ResourceSaver.save(packed_scene, scene_path)
+    
+    if save_result != OK:
+        printerr("Failed to save scene: " + str(save_result))
+        quit(1)
+    
+    if debug_mode:
+        print("Scene saved successfully")
+    
+    # Return success result
+    var result = {
+        "success": true,
+        "scene_path": scene_path,
+        "deleted_node": node_path,
+        "parent_node": parent_node.name
+    }
+    print(JSON.stringify(result))
+    
+    # Cleanup
+    scene_root.free()
+    
+    if debug_mode:
+        print("Node deletion complete: " + node_path)
