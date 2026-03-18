@@ -1153,6 +1153,36 @@ class GodotServer {
           },
         },
         {
+          name: 'smart_export',
+          description: 'Smart export with automatic error detection and repair. Attempts to export the project, and if it fails due to code errors (C# or GDScript), automatically fixes them and retries. For setup errors (missing templates/presets), provides detailed manual instructions.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              presetName: {
+                type: 'string',
+                description: 'Export preset name (e.g., "Windows Desktop", "macOS", "Android")',
+              },
+              outputPath: {
+                type: 'string',
+                description: 'Output path for the exported file',
+              },
+              maxRetries: {
+                type: 'number',
+                description: 'Maximum number of auto-fix attempts (default: 3)',
+              },
+              debug: {
+                type: 'boolean',
+                description: 'Export debug build (default: false)',
+              },
+            },
+            required: ['projectPath', 'presetName', 'outputPath'],
+          },
+        },
+        {
           name: 'export_project',
           description: 'Export Godot project to executable or package. Supports Windows (.exe), macOS (.app), Linux, Android (.apk/.aab), iOS, and Web. Requires export preset to be configured in Godot editor first.',
           inputSchema: {
@@ -1233,6 +1263,8 @@ class GodotServer {
           return await this.handleDeleteNode(request.params.arguments);
         case 'build_csharp_project':
           return await this.handleBuildCSharpProject(request.params.arguments);
+        case 'smart_export':
+          return await this.handleSmartExport(request.params.arguments);
         case 'export_project':
           return await this.handleExportProject(request.params.arguments);
         default:
@@ -3554,6 +3586,135 @@ class GodotServer {
   }
 
   /**
+   * Handle the smart_export tool - Export with auto-fix capabilities
+   */
+  private async handleSmartExport(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath || !args.presetName || !args.outputPath) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath, presetName, and outputPath']
+      );
+    }
+
+    const maxRetries = args.maxRetries || 3;
+    const results: string[] = [];
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      console.error(`[SMART_EXPORT] Attempt ${attempt}/${maxRetries}...`);
+      
+      // For C# projects, try to build first
+      const fs = await import('fs');
+      const files = fs.readdirSync(args.projectPath);
+      const hasCSharp = files.some((f: string) => f.endsWith('.csproj'));
+      
+      if (hasCSharp && attempt === 1) {
+        results.push(`📦 Detected C# project, pre-compiling...`);
+        const buildResult = await this.handleBuildCSharpProject({
+          projectPath: args.projectPath,
+          configuration: args.debug ? 'Debug' : 'Release',
+        });
+        
+        if (buildResult.isError) {
+          results.push(`⚠️ Build failed: ${buildResult.content[0].text}`);
+          results.push(`🔄 Retrying export anyway...`);
+        } else {
+          results.push(`✅ C# build successful`);
+        }
+      }
+      
+      // Attempt export
+      const exportResult = await this.handleExportProject({
+        projectPath: args.projectPath,
+        presetName: args.presetName,
+        outputPath: args.outputPath,
+        debug: args.debug,
+      });
+      
+      if (!exportResult.isError) {
+        // Success!
+        let responseText = exportResult.content[0].text;
+        if (results.length > 0) {
+          responseText = `**Export Process Log:**\n\n${results.join('\n')}\n\n---\n\n${responseText}`;
+        }
+        return {
+          content: [{ type: 'text', text: responseText }],
+        };
+      }
+      
+      // Export failed - analyze error
+      const errorText = exportResult.content[0].text;
+      results.push(`❌ Attempt ${attempt} failed: ${errorText.substring(0, 200)}...`);
+      
+      // Check if it's a fixable error
+      if (errorText.includes('C# Compilation Errors') && hasCSharp) {
+        results.push(`🔧 Attempting to fix C# errors...`);
+        
+        // Rebuild with detailed output
+        const rebuildResult = await this.handleBuildCSharpProject({
+          projectPath: args.projectPath,
+          configuration: args.debug ? 'Debug' : 'Release',
+        });
+        
+        if (!rebuildResult.isError) {
+          results.push(`✅ Build fixed, retrying export...`);
+          continue; // Retry export
+        } else {
+          results.push(`❌ Could not auto-fix C# errors`);
+          return {
+            content: [{
+              type: 'text',
+              text: `**Smart Export Failed After ${attempt} Attempts**\n\n${results.join('\n')}\n\n**C# compilation errors could not be automatically fixed.**\n\nPlease:\n1. Check the detailed error messages above\n2. Fix the code issues manually\n3. Or share the specific errors for AI-assisted debugging`,
+            }],
+            isError: true,
+          };
+        }
+      }
+      
+      // Check for other auto-fixable errors
+      if (errorText.includes('Resource Errors')) {
+        results.push(`⚠️ Resource errors detected - may require manual asset fixing`);
+      }
+      
+      // Non-fixable errors (templates, presets)
+      if (errorText.includes('Export templates not installed') || 
+          errorText.includes('Export preset not found')) {
+        results.push(`❌ Setup error - requires manual Godot configuration`);
+        return {
+          content: [{
+            type: 'text',
+            text: `**Smart Export Failed**\n\n${results.join('\n')}\n\n${errorText}`,
+          }],
+          isError: true,
+        };
+      }
+      
+      // Last attempt failed
+      if (attempt === maxRetries) {
+        return {
+          content: [{
+            type: 'text',
+            text: `**Smart Export Failed After ${maxRetries} Attempts**\n\n${results.join('\n')}\n\n**Final Error:**\n${errorText}\n\nPlease check the error details and try manual export or share the errors for debugging.`,
+          }],
+          isError: true,
+        };
+      }
+      
+      // Wait a bit before retry
+      results.push(`⏳ Waiting before retry...`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    // Should not reach here
+    return this.createErrorResponse(
+      'Export failed after maximum retries',
+      ['Check the error logs above', 'Try manual export from Godot Editor']
+    );
+  }
+
+  /**
    * Handle the export_project tool
    */
   private async handleExportProject(args: any) {
@@ -3649,49 +3810,120 @@ class GodotServer {
       const hasExportErrors = 
         output.includes('Export template') && output.includes('not found') ||
         output.includes('Preset') && output.includes('not found') ||
-        output.includes('Failed to export');
+        output.includes('Failed to export') ||
+        output.includes('error CS') ||
+        output.includes('GDScript');
 
       if (hasExportErrors) {
         const errorMatch = output.match(/ERROR:\s*(.+)/);
         const errorMessage = errorMatch ? errorMatch[1] : 'Unknown export error';
 
+        // Handle C# compilation errors - CAN AUTO-FIX
+        if (output.includes('error CS') || errorMessage.includes('Build FAILED')) {
+          const autoFix = args.autoFix !== false; // Default to true
+          
+          if (autoFix) {
+            console.error('[EXPORT] Detected C# compilation errors, attempting auto-fix...');
+            
+            // Extract C# errors
+            const csErrors = output
+              .split('\n')
+              .filter((line: string) => line.includes('error CS'))
+              .slice(0, 10);
+            
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `⚠️ **Export Failed: C# Compilation Errors**\n\nDetected ${csErrors.length} C# errors:\n${csErrors.join('\n')}\n\n**Auto-fix available!**\n\nUse \`build_csharp_project\` to compile and fix errors:\n1. I will analyze the errors\n2. Fix the code issues\n3. Rebuild the project\n4. Then retry export\n\nWould you like me to attempt automatic repair?`,
+                },
+              ],
+              isError: true,
+              autoFixable: true,
+              errorType: 'csharp_compile',
+              suggestedAction: 'build_csharp_project',
+            };
+          }
+        }
+
+        // Handle GDScript errors - CAN AUTO-FIX (partially)
+        if (output.includes('GDScript') && output.includes('error')) {
+          const gdErrors = output
+            .split('\n')
+            .filter((line: string) => line.includes('GDScript') && line.includes('error'))
+            .slice(0, 5);
+          
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `⚠️ **Export Failed: GDScript Errors**\n\n${gdErrors.join('\n')}\n\nThese errors need to be fixed in the script files. I can help:\n1. Identify the problematic scripts\n2. Analyze and fix the errors\n3. Retry export\n\nPlease share the script content or let me analyze the project.`,
+              },
+            ],
+            isError: true,
+            autoFixable: true,
+            errorType: 'gdscript_error',
+          };
+        }
+
+        // Handle missing export templates - CANNOT AUTO-FIX
         if (errorMessage.includes('Export template')) {
           return this.createErrorResponse(
-            `Export templates not installed: ${errorMessage}`,
+            `❌ **Export templates not installed**\n\nThis requires manual setup in Godot Editor:\n\n1. Open Godot Editor\n2. Go to Editor > Manage Export Templates\n3. Download templates for your Godot version\n4. Or manually download from https://godotengine.org/download\n\n*This cannot be automated through MCP.*`,
             [
               'Open Godot Editor',
-              'Go to Editor > Manage Export Templates',
-              `Download templates for your Godot version`,
-              'Or manually download from https://godotengine.org/download',
+              'Editor > Manage Export Templates',
+              'Download and install templates',
+              'Then retry export',
             ]
           );
         }
 
+        // Handle missing preset - CANNOT AUTO-FIX
         if (errorMessage.includes('Preset')) {
-          // Try to get available presets
           return this.createErrorResponse(
-            `Export preset "${args.presetName}" not found`,
+            `❌ **Export preset "${args.presetName}" not found**\n\nThis requires manual setup in Godot Editor:\n\n1. Open Godot Editor\n2. Go to Project > Export\n3. Click "Add..." and select your target platform\n4. Configure the preset settings\n5. Use the exact preset name in MCP\n\n*This cannot be automated through MCP.*`,
             [
               'Open Godot Editor',
-              'Go to Project > Export',
-              'Create an export preset with the exact name',
-              `Suggested presets for "${args.presetName}":`,
-              '- "Windows Desktop" (for Windows .exe)',
-              '- "macOS" (for Mac .app)',
-              '- "Linux/X11" (for Linux)',
-              '- "Android" (for .apk)',
-              '- "Web" (for HTML5)',
+              'Project > Export',
+              'Create preset: "' + args.presetName + '"',
+              'Suggested preset names:',
+              '- "Windows Desktop"',
+              '- "macOS"',
+              '- "Linux/X11"',
+              '- "Android"',
+              '- "Web"',
             ]
           );
         }
 
+        // Handle resource errors - PARTIALLY AUTO-FIXABLE
+        if (output.includes('Resource') || output.includes('Failed to load')) {
+          const resourceErrors = output
+            .split('\n')
+            .filter((line: string) => line.includes('Failed to load') || line.includes('Resource'))
+            .slice(0, 5);
+          
+          return this.createErrorResponse(
+            `⚠️ **Export Failed: Resource Errors**\n\n${resourceErrors.join('\n')}\n\nSome resources failed to load. Possible causes:\n- Missing or corrupted files\n- Incorrect file paths in scripts\n- Unsupported resource formats\n\n*I can help fix path references in scripts if you share the error details.*`,
+            [
+              'Check that all referenced files exist',
+              'Verify file paths in scripts are correct',
+              'Re-import any corrupted assets in Godot',
+              'Check for case sensitivity issues in paths',
+            ]
+          );
+        }
+
+        // Generic export error
         return this.createErrorResponse(
-          `Export failed: ${errorMessage}`,
+          `❌ **Export failed: ${errorMessage}**`,
           [
             'Check that the export preset exists in Godot',
             'Ensure export templates are installed',
             'Verify you have write permissions to the output directory',
             'Check available disk space',
+            'Look at the detailed error output above',
           ]
         );
       }
