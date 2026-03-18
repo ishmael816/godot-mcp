@@ -81,6 +81,8 @@ func _init():
             set_node_property(params)
         "delete_node":
             delete_node(params)
+        "build_csharp_project":
+            build_csharp_project(params)
         _:
             log_error("Unknown operation: " + operation)
             quit(1)

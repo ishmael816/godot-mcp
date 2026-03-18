@@ -1129,6 +1129,29 @@ class GodotServer {
             required: ['projectPath', 'scenePath', 'nodePath'],
           },
         },
+        {
+          name: 'build_csharp_project',
+          description: 'Compile C# scripts in a Godot project. Automatically detects .csproj files and runs dotnet build. Required after modifying C# scripts before running the project.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              configuration: {
+                type: 'string',
+                enum: ['Debug', 'Release'],
+                description: 'Build configuration (default: Debug)',
+              },
+              useGodotBuild: {
+                type: 'boolean',
+                description: 'Use Godot\'s built-in build instead of dotnet CLI (default: false)',
+              },
+            },
+            required: ['projectPath'],
+          },
+        },
       ],
     }));
 
@@ -1178,6 +1201,8 @@ class GodotServer {
           return await this.handleSetNodeProperty(request.params.arguments);
         case 'delete_node':
           return await this.handleDeleteNode(request.params.arguments);
+        case 'build_csharp_project':
+          return await this.handleBuildCSharpProject(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -3293,6 +3318,204 @@ class GodotServer {
           'Verify the project path is accessible',
           'Make sure the scene file is valid',
           'Ensure the node exists in the scene',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the build_csharp_project tool
+   */
+  private async handleBuildCSharpProject(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        ['Provide a valid path to a Godot project directory']
+      );
+    }
+
+    if (!this.validatePath(args.projectPath)) {
+      return this.createErrorResponse(
+        'Invalid project path',
+        ['Provide a valid path without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      // Check if the project directory exists and contains a project.godot file
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      // Check if this is a C# project
+      const fs = await import('fs');
+      const path = await import('path');
+      
+      const files = fs.readdirSync(args.projectPath);
+      const csprojFiles = files.filter((f: string) => f.endsWith('.csproj'));
+      
+      if (csprojFiles.length === 0) {
+        return this.createErrorResponse(
+          'No C# project file found',
+          [
+            'This does not appear to be a C# Godot project',
+            'Looked for .csproj files in the project directory',
+            'For GDScript projects, C# compilation is not needed',
+          ]
+        );
+      }
+
+      const csprojFile = csprojFiles[0];
+      const csprojPath = join(args.projectPath, csprojFile);
+
+      this.logDebug(`Found C# project: ${csprojFile}`);
+
+      // Determine build method
+      const useGodotBuild = args.useGodotBuild === true;
+      const configuration = args.configuration || 'Debug';
+
+      let buildCommand: string;
+      let buildArgs: string[];
+      let buildDescription: string;
+
+      if (useGodotBuild) {
+        // Use Godot's built-in build command
+        if (!this.godotPath) {
+          await this.detectGodotPath();
+        }
+        
+        if (!this.godotPath) {
+          return this.createErrorResponse(
+            'Godot executable not found',
+            [
+              'Set GODOT_PATH environment variable',
+              'Or use dotnet CLI build instead (useGodotBuild: false)',
+            ]
+          );
+        }
+
+        buildCommand = this.godotPath;
+        buildArgs = ['--build-solutions', '--path', args.projectPath];
+        buildDescription = `Godot build (${configuration})`;
+      } else {
+        // Use dotnet CLI
+        buildCommand = 'dotnet';
+        buildArgs = ['build', csprojPath, '-c', configuration];
+        buildDescription = `dotnet build (${configuration})`;
+      }
+
+      this.logDebug(`Running: ${buildCommand} ${buildArgs.join(' ')}`);
+
+      // Execute build
+      const { stdout, stderr } = await execFileAsync(buildCommand, buildArgs, {
+        cwd: args.projectPath,
+        timeout: 120000, // 2 minute timeout for builds
+      });
+
+      const output = stdout || '';
+      const errors = stderr || '';
+
+      // Check for build success
+      const hasErrors = errors.includes('error') || 
+                       output.includes('Build FAILED') ||
+                       output.includes('error CS');
+
+      if (hasErrors) {
+        // Try to extract error details
+        const errorLines = (output + '\n' + errors)
+          .split('\n')
+          .filter((line: string) => 
+            line.includes('error CS') || 
+            line.includes('warning CS') ||
+            line.includes('Build FAILED')
+          )
+          .slice(0, 20); // Limit to first 20 errors
+
+        const errorDetails = errorLines.length > 0 
+          ? errorLines.join('\n') 
+          : (errors || output);
+
+        return this.createErrorResponse(
+          `C# build failed\n\nError details:\n${errorDetails}`,
+          [
+            'Fix the compilation errors listed above',
+            'Check that all C# class names match their file names',
+            'Ensure all referenced types are properly imported',
+            'For Godot-specific errors, verify you\'re using the correct Godot C# API',
+          ]
+        );
+      }
+
+      // Parse success info
+      const timeMatch = output.match(/Time Elapsed\s+([\d:]+)/);
+      const timeElapsed = timeMatch ? timeMatch[1] : 'unknown';
+
+      const warningCount = (output.match(/warning CS/g) || []).length;
+
+      let responseText = `✅ **C# Build Successful**\n\n`;
+      responseText += `Project: ${csprojFile}\n`;
+      responseText += `Configuration: ${configuration}\n`;
+      responseText += `Build method: ${buildDescription}\n`;
+      responseText += `Time elapsed: ${timeElapsed}\n`;
+      
+      if (warningCount > 0) {
+        responseText += `Warnings: ${warningCount}\n\n`;
+        responseText += `*Tip: Run with Release configuration for optimized builds.*`;
+      } else {
+        responseText += `\nNo warnings! 🎉`;
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
+    } catch (error: any) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      
+      // Check for specific errors
+      if (errorMessage.includes('dotnet') || errorMessage.includes('ENOENT')) {
+        return this.createErrorResponse(
+          'dotnet CLI not found',
+          [
+            'Install .NET SDK: https://dotnet.microsoft.com/download',
+            'Ensure dotnet is in your system PATH',
+            'Or use useGodotBuild: true to use Godot\'s built-in compiler',
+          ]
+        );
+      }
+
+      if (errorMessage.includes('timeout')) {
+        return this.createErrorResponse(
+          'Build timeout',
+          [
+            'Build took too long (over 2 minutes)',
+            'Try building manually first to warm up the cache',
+            'Check for complex dependencies that might slow down compilation',
+          ]
+        );
+      }
+
+      return this.createErrorResponse(
+        `Build failed: ${errorMessage}`,
+        [
+          'Ensure .NET SDK is installed',
+          'Verify the C# project file is valid',
+          'Check that all NuGet packages are restored',
+          'Try running "dotnet restore" manually first',
         ]
       );
     }
