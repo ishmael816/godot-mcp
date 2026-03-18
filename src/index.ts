@@ -1152,6 +1152,36 @@ class GodotServer {
             required: ['projectPath'],
           },
         },
+        {
+          name: 'export_project',
+          description: 'Export Godot project to executable or package. Supports Windows (.exe), macOS (.app), Linux, Android (.apk/.aab), iOS, and Web. Requires export preset to be configured in Godot editor first.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              presetName: {
+                type: 'string',
+                description: 'Export preset name (e.g., "Windows Desktop", "macOS", "Linux/X11", "Android")',
+              },
+              outputPath: {
+                type: 'string',
+                description: 'Output path for the exported file (e.g., "builds/mygame.exe")',
+              },
+              debug: {
+                type: 'boolean',
+                description: 'Export debug build instead of release (default: false)',
+              },
+              patches: {
+                type: 'string',
+                description: 'Optional: PCK file to embed (for patch exports)',
+              },
+            },
+            required: ['projectPath', 'presetName', 'outputPath'],
+          },
+        },
       ],
     }));
 
@@ -1203,6 +1233,8 @@ class GodotServer {
           return await this.handleDeleteNode(request.params.arguments);
         case 'build_csharp_project':
           return await this.handleBuildCSharpProject(request.params.arguments);
+        case 'export_project':
+          return await this.handleExportProject(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -3516,6 +3548,226 @@ class GodotServer {
           'Verify the C# project file is valid',
           'Check that all NuGet packages are restored',
           'Try running "dotnet restore" manually first',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the export_project tool
+   */
+  private async handleExportProject(args: any) {
+    // Normalize parameters to camelCase
+    args = this.normalizeParameters(args);
+    
+    if (!args.projectPath || !args.presetName || !args.outputPath) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath, presetName, and outputPath']
+      );
+    }
+
+    if (!this.validatePath(args.projectPath) || !this.validatePath(args.outputPath)) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      // Check if the project directory exists and contains a project.godot file
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      // Ensure godotPath is set
+      if (!this.godotPath) {
+        await this.detectGodotPath();
+        if (!this.godotPath) {
+          return this.createErrorResponse(
+            'Could not find a valid Godot executable path',
+            [
+              'Ensure Godot is installed correctly',
+              'Set GODOT_PATH environment variable to specify the correct path',
+            ]
+          );
+        }
+      }
+
+      // Create output directory if it doesn't exist
+      const outputDir = dirname(args.outputPath);
+      if (!existsSync(outputDir)) {
+        mkdirSync(outputDir, { recursive: true });
+        this.logDebug(`Created output directory: ${outputDir}`);
+      }
+
+      // Build export command
+      const isDebug = args.debug === true;
+      const exportFlag = isDebug ? '--export-debug' : '--export-release';
+      
+      const exportArgs = [
+        '--headless',
+        exportFlag,
+        args.presetName,
+        args.outputPath,
+      ];
+
+      // Add optional PCK patch
+      if (args.patches) {
+        exportArgs.push('--export-patches', args.patches);
+      }
+
+      this.logDebug(`Exporting project: ${this.godotPath} ${exportArgs.join(' ')}`);
+
+      // Execute export
+      let stdout: string;
+      let stderr: string;
+      
+      try {
+        const result = await execFileAsync(this.godotPath!, exportArgs, {
+          cwd: args.projectPath,
+          timeout: 300000, // 5 minute timeout for exports
+        });
+        stdout = result.stdout || '';
+        stderr = result.stderr || '';
+      } catch (execError: any) {
+        // Godot export may exit with non-zero code even on success
+        stdout = execError.stdout || '';
+        stderr = execError.stderr || '';
+      }
+
+      const output = stdout + '\n' + stderr;
+
+      // Check for common export errors
+      const hasExportErrors = 
+        output.includes('Export template') && output.includes('not found') ||
+        output.includes('Preset') && output.includes('not found') ||
+        output.includes('Failed to export');
+
+      if (hasExportErrors) {
+        const errorMatch = output.match(/ERROR:\s*(.+)/);
+        const errorMessage = errorMatch ? errorMatch[1] : 'Unknown export error';
+
+        if (errorMessage.includes('Export template')) {
+          return this.createErrorResponse(
+            `Export templates not installed: ${errorMessage}`,
+            [
+              'Open Godot Editor',
+              'Go to Editor > Manage Export Templates',
+              `Download templates for your Godot version`,
+              'Or manually download from https://godotengine.org/download',
+            ]
+          );
+        }
+
+        if (errorMessage.includes('Preset')) {
+          // Try to get available presets
+          return this.createErrorResponse(
+            `Export preset "${args.presetName}" not found`,
+            [
+              'Open Godot Editor',
+              'Go to Project > Export',
+              'Create an export preset with the exact name',
+              `Suggested presets for "${args.presetName}":`,
+              '- "Windows Desktop" (for Windows .exe)',
+              '- "macOS" (for Mac .app)',
+              '- "Linux/X11" (for Linux)',
+              '- "Android" (for .apk)',
+              '- "Web" (for HTML5)',
+            ]
+          );
+        }
+
+        return this.createErrorResponse(
+          `Export failed: ${errorMessage}`,
+          [
+            'Check that the export preset exists in Godot',
+            'Ensure export templates are installed',
+            'Verify you have write permissions to the output directory',
+            'Check available disk space',
+          ]
+        );
+      }
+
+      // Check if output file was created
+      if (!existsSync(args.outputPath)) {
+        return this.createErrorResponse(
+          'Export appeared to succeed but output file was not created',
+          [
+            'Check Godot output for warnings',
+            'Verify the export preset is correctly configured',
+            'Check that all resources are valid',
+          ]
+        );
+      }
+
+      // Get file size
+      const fs = await import('fs');
+      const stats = fs.statSync(args.outputPath);
+      const fileSizeMB = (stats.size / 1024 / 1024).toFixed(2);
+
+      // Parse export info from output
+      const exportTimeMatch = output.match(/EXPORT_TIME:\s*([\d.]+)/);
+      const exportTime = exportTimeMatch ? `${exportTimeMatch[1]}s` : 'unknown';
+
+      let responseText = `✅ **Export Successful!**\n\n`;
+      responseText += `Preset: ${args.presetName}\n`;
+      responseText += `Output: ${args.outputPath}\n`;
+      responseText += `File size: ${fileSizeMB} MB\n`;
+      responseText += `Build type: ${isDebug ? 'Debug' : 'Release'}\n`;
+      
+      if (exportTime !== 'unknown') {
+        responseText += `Export time: ${exportTime}\n`;
+      }
+
+      responseText += `\nYour game is ready to distribute! 🎉`;
+
+      // Add platform-specific notes
+      if (args.presetName.toLowerCase().includes('windows')) {
+        responseText += `\n\n*Note: Windows exports may trigger antivirus false positives. Consider code signing for distribution.*`;
+      } else if (args.presetName.toLowerCase().includes('mac')) {
+        responseText += `\n\n*Note: macOS exports need code signing and notarization for distribution outside the App Store.*`;
+      } else if (args.presetName.toLowerCase().includes('android')) {
+        responseText += `\n\n*Note: Android exports need to be signed with a keystore for Google Play distribution.*`;
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
+    } catch (error: any) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      
+      if (errorMessage.includes('timeout')) {
+        return this.createErrorResponse(
+          'Export timeout',
+          [
+            'Export took too long (over 5 minutes)',
+            'Try exporting manually first to cache resources',
+            'Check for large assets that may slow down export',
+          ]
+        );
+      }
+
+      return this.createErrorResponse(
+        `Export failed: ${errorMessage}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Check if the GODOT_PATH environment variable is set correctly',
+          'Verify export templates are installed',
+          'Check that the export preset exists',
+          'Ensure you have write permissions to the output directory',
         ]
       );
     }
