@@ -26,4 +26,21 @@ try {
   process.exit(1);
 }
 
+// Copy the editor_plugin directory to the build directory
+try {
+  const pluginSrcDir = path.join(__dirname, '..', 'src', 'editor_plugin');
+  const pluginBuildDir = path.join(__dirname, '..', 'build', 'editor_plugin');
+  
+  if (fs.existsSync(pluginSrcDir)) {
+    fs.ensureDirSync(pluginBuildDir);
+    fs.copySync(pluginSrcDir, pluginBuildDir);
+    console.log('Successfully copied editor_plugin to build/editor_plugin');
+  } else {
+    console.log('editor_plugin source directory not found, skipping...');
+  }
+} catch (error) {
+  console.error('Error copying editor_plugin:', error);
+  process.exit(1);
+}
+
 console.log('Build scripts completed successfully!');

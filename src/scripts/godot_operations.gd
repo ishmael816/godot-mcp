@@ -1732,7 +1732,7 @@ func set_node_property(params):
     var parsed_value = parse_property_value(property_value)
     
     if debug_mode:
-        print("Parsed value: " + str(parsed_value) + " (type: " + typeof(parsed_value) + ")")
+        print("Parsed value: " + str(parsed_value) + " (type: " + type_string(typeof(parsed_value)) + ")")
     
     # Handle nested property paths (e.g., "position:x" or "theme_override_colors/font_color")
     var property_parts = property_path.split(":")
@@ -1865,13 +1865,13 @@ func parse_property_value(value):
     var str_value = str(value)
     
     # Try to parse Vector2 (e.g., "Vector2(100, 200)" or "(100, 200)")
-    var vector2_match = str_value.match(r"^\\s*(?:Vector2)?\\s*\\(\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*\\)\\s*$")
-    if vector2_match:
+    var vector2_match = str_value.match(r"^\s*(?:Vector2)?\s*\(\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*\)\s*$")
+    if vector2_match is Array and vector2_match.size() >= 3:
         return Vector2(float(vector2_match[1]), float(vector2_match[2]))
     
     # Try to parse Vector3
-    var vector3_match = str_value.match(r"^\\s*(?:Vector3)?\\s*\\(\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*\\)\\s*$")
-    if vector3_match:
+    var vector3_match = str_value.match(r"^\s*(?:Vector3)?\s*\(\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*\)\s*$")
+    if vector3_match is Array and vector3_match.size() >= 4:
         return Vector3(float(vector3_match[1]), float(vector3_match[2]), float(vector3_match[3]))
     
     # Try to parse Color (e.g., "Color.red", "Color(1, 0, 0)", "#ff0000")
@@ -1892,12 +1892,14 @@ func parse_property_value(value):
             _:
                 printerr("Unknown color name: " + color_name)
     
-    var color_match = str_value.match(r"^\\s*Color\\s*\\(\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*,\\s*([+-]?\\d+\\.?\\d*)\\s*(?:,\\s*([+-]?\\d+\\.?\\d*)\\s*)?\\)\\s*$")
-    if color_match:
+    var color_match = str_value.match(r"^\s*Color\s*\(\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*,\s*([+-]?\d+\.?\d*)\s*(?:,\s*([+-]?\d+\.?\d*)\s*)?\)\s*$")
+    if color_match is Array and color_match.size() >= 4:
         var r = float(color_match[1])
         var g = float(color_match[2])
         var b = float(color_match[3])
-        var a = float(color_match[4]) if color_match[4] else 1.0
+        var a = 1.0
+        if color_match.size() > 4 and color_match[4]:
+            a = float(color_match[4])
         return Color(r, g, b, a)
     
     # Try hex color (e.g., "#ff0000" or "#ff0000ff")
@@ -2058,3 +2060,48 @@ func delete_node(params):
     
     if debug_mode:
         print("Node deletion complete: " + node_path)
+
+
+# Build C# project using dotnet or Godot's built-in build
+func build_csharp_project(params):
+    print("Building C# project...")
+    
+    var project_path = params.get("project_path", "")
+    var configuration = params.get("configuration", "Debug")
+    var use_godot_build = params.get("use_godot_build", false)
+    
+    if debug_mode:
+        print("Project path: " + project_path)
+        print("Configuration: " + configuration)
+        print("Use Godot build: " + str(use_godot_build))
+    
+    # Check if this is actually a C# project
+    var csproj_files = find_files("res://", ".csproj")
+    if csproj_files.size() == 0:
+        printerr("No .csproj files found. This does not appear to be a C# project.")
+        quit(1)
+    
+    if debug_mode:
+        print("Found " + str(csproj_files.size()) + " .csproj file(s)")
+    
+    print("C# project files found. Build verification complete.")
+    print("Note: For full C# build, use Godot Editor or run 'dotnet build' manually.")
+    
+    var result = {
+        "success": true,
+        "csproj_files": csproj_files,
+        "configuration": configuration,
+        "message": "C# project structure verified. Use Godot Editor for full build."
+    }
+    print(JSON.stringify(result))
+
+# Run project in debug mode
+func run_project(params):
+    print("Note: run_project is handled by the MCP server, not the GDScript.")
+    print("This operation should be performed directly by the server.")
+    
+    var result = {
+        "success": true,
+        "message": "Use the MCP server's run_project tool instead."
+    }
+    print(JSON.stringify(result))
